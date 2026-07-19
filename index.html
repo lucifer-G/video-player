@@ -210,9 +210,8 @@ const SOURCES = [
 ];
 
 const PROXIES = [
-  {url:'https://api.allorigins.win/raw?url=', fmt:'query'},
+  {url:'https://proxy.cors.sh/', fmt:'path'},
   {url:'https://corsproxy.io/?', fmt:'query'},
-  {url:'http://localhost:8900/fetch?url=', fmt:'query'},
 ];
 
 // ============================
@@ -250,7 +249,7 @@ async function apiFetch(url, timeout=20000) {
   // proxy-first for reliability
   for (const p of PROXIES) {
     try {
-      const u = p.fmt==='query' ? p.url+encodeURIComponent(url) : p.url+url.replace(/^https?:\/\//,'');
+      const u = p.fmt==='query' ? p.url+encodeURIComponent(url) : p.url+url;
       const r = await fetch(u, {signal:AbortSignal.timeout(timeout)});
       if (r.ok) {
         const t = await r.text();
@@ -518,7 +517,7 @@ async function downloadOne(url, title) {
   // Fetch via CORS proxy to get blob
   for (const p of PROXIES) {
     try {
-      const proxyUrl = p.fmt==='query' ? p.url+encodeURIComponent(url) : p.url+url.replace(/^https?:\/\//,'');
+      const proxyUrl = p.fmt==='query' ? p.url+encodeURIComponent(url) : p.url+url;
       const r = await fetch(proxyUrl, {signal: AbortSignal.timeout(180000)});
       if (r.ok) {
         const blob = await r.blob();
