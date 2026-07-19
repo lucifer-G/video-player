@@ -86,14 +86,14 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .player-top .p-actions button.accent{background:var(--accent);border-color:var(--accent)}
 /* Source picker popup */
 .p-actions{position:relative}
-.src-popup{position:fixed;bottom:0;left:0;right:0;background:var(--bg2);border-radius:16px 16px 0 0;padding:8px 0 24px;z-index:250;display:none;box-shadow:0 -4px 20px rgba(0,0,0,.6);animation:slideUp .25s ease}
+.src-popup{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--bg2);border-radius:16px;padding:8px 0 16px;z-index:250;display:none;box-shadow:0 8px 32px rgba(0,0,0,.7);max-width:320px;width:85%;max-height:70vh;overflow-y:auto}
 .src-popup.show{display:block}
-.src-popup .sp-title{font-size:13px;color:var(--text2);padding:12px 20px 4px}
-.src-popup .sp-item{display:flex;align-items:center;gap:10px;padding:14px 20px;cursor:pointer;font-size:15px;color:var(--text);transition:background .15s}
+.src-popup .sp-title{font-size:14px;color:var(--text);padding:12px 20px 8px;font-weight:600}
+.src-popup .sp-item{display:flex;align-items:center;gap:10px;padding:12px 20px;cursor:pointer;font-size:14px;color:var(--text);transition:background .15s}
 .src-popup .sp-item:hover,.src-popup .sp-item:active{background:rgba(255,77,106,.12)}
 .src-popup .sp-item.current{color:var(--accent);font-weight:500}
 .src-popup .sp-item.current::after{content:'✓';margin-left:auto;font-size:14px}
-.src-overlay{position:fixed;inset:0;z-index:240;display:none;background:rgba(0,0,0,.5)}
+.src-overlay{position:fixed;inset:0;z-index:240;display:none;background:rgba(0,0,0,.6)}
 .src-overlay.show{display:block}
 
 .video-wrap{flex:1;background:#000;position:relative}
@@ -102,9 +102,6 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .video-loading .spin{display:inline-block;width:36px;height:36px;border:3px solid rgba(255,255,255,.1);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;margin-bottom:10px}
 @keyframes spin{to{transform:rotate(360deg)}}
 
-.ep-row{display:flex;gap:4px;padding:6px 10px;overflow-x:auto;background:rgba(0,0,0,.95);flex-wrap:wrap;max-height:100px;overflow-y:auto;z-index:10}
-.ep-dot{padding:5px 12px;border-radius:12px;cursor:pointer;font-size:11px;white-space:nowrap;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:var(--text2);transition:all .15s;user-select:none}
-.ep-dot:hover,.ep-dot.active{background:var(--accent);color:#fff;border-color:var(--accent)}
 
 /* ========== Detail Modal ========== */
 .detail-overlay{position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:200;display:none;align-items:flex-end;justify-content:center}
@@ -176,19 +173,18 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
       <div class="p-src" id="pSrc"></div>
     </div>
     <div class="p-actions">
-      <div style="position:relative">
-        <button onclick="toggleSrcPopup()" title="选择线路">换源</button>
-        <div class="src-popup" id="srcPopup"></div>
-      </div>
-      <div class="src-overlay" id="srcOverlay" onclick="hideSrcPopup()"></div>
-      <button onclick="downloadCurrent()" title="下载当前">下载</button>
+      <button onclick="toggleEpsPopup()">选集</button>
+      <button onclick="toggleSrcPopup()">换源</button>
+      <button onclick="downloadCurrent()">下载</button>
     </div>
   </div>
   <div class="video-wrap" id="videoWrap">
     <div class="video-loading" id="videoLoading"><div class="spin"></div><div>加载中…</div></div>
   </div>
-  <div class="ep-row" id="epRow"></div>
 </div>
+
+<div class="src-overlay" id="srcOverlay" onclick="hideSrcPopup()"></div>
+<div class="src-popup" id="srcPopup"></div>
 
 <!-- ========== Detail Sheet ========== -->
 <div class="detail-overlay" id="detailOverlay">
@@ -422,33 +418,41 @@ function loadCurrentEpisode() {
   const l = S.lines[S.lineIdx]; const e = l?.episodes[S.epIdx];
   if (!e) return;
   document.getElementById('pSrc').textContent = l.name + ' · ' + e.title;
-  renderEpBar();
   loadUrl(e.url);
 }
-function renderEpBar() {
+function toggleEpsPopup() {
   const l = S.lines[S.lineIdx];
-  const el = document.getElementById('epRow');
-  if (!l||l.episodes.length<=1){el.innerHTML='';return;}
-  el.innerHTML = l.episodes.map((e,i)=>`<span class="ep-dot${i===S.epIdx?' active':''}" onclick="playEp(${i})">${esc(e.title)}</span>`).join('');
-}
-function playEp(i) {
-  S.epIdx = i;
-  document.getElementById('pSrc').textContent = S.lines[S.lineIdx].name+' · '+S.lines[S.lineIdx].episodes[i].title;
-  renderEpBar();
-  loadUrl(S.lines[S.lineIdx].episodes[i].url);
+  if (!l || l.episodes.length <= 1) { toast('只有一集'); return; }
+  showPopup(
+    `选集 · ${esc(l.name)}`,
+    l.episodes.map((e,i)=>({name:esc(e.title), active:i===S.epIdx, action:()=>selectEp(i)}))
+  );
 }
 function toggleSrcPopup() {
   if (S.lines.length <= 1) { toast('只有一条线路'); return; }
+  showPopup(
+    '选择播放线路',
+    S.lines.map((l,i)=>({name:`${esc(l.name)} · ${l.episodes.length}集`, active:i===S.lineIdx, action:()=>selectLine(i)}))
+  );
+}
+function showPopup(title, items) {
   const popup = document.getElementById('srcPopup');
   const overlay = document.getElementById('srcOverlay');
   if (popup.classList.contains('show')) { hideSrcPopup(); return; }
-  popup.innerHTML = `<div class="sp-title">选择播放线路</div>` + S.lines.map((l,i)=>`<div class="sp-item${i===S.lineIdx?' current':''}" onclick="selectLine(${i})">${esc(l.name)}<span style="font-size:11px;color:var(--text2)">${l.episodes.length}集</span></div>`).join('');
+  popup.innerHTML = `<div class="sp-title">${title}</div>` + items.map(it=>`<div class="sp-item${it.active?' current':''}" onclick="(${it.action.toString()})()">${it.name}</div>`).join('');
   popup.classList.add('show');
   overlay.classList.add('show');
 }
 function hideSrcPopup() {
   document.getElementById('srcPopup').classList.remove('show');
   document.getElementById('srcOverlay').classList.remove('show');
+}
+function selectEp(i) {
+  hideSrcPopup();
+  if (i === S.epIdx) return;
+  S.epIdx = i;
+  document.getElementById('pSrc').textContent = S.lines[S.lineIdx].name+' · '+S.lines[S.lineIdx].episodes[i].title;
+  loadUrl(S.lines[S.lineIdx].episodes[i].url);
 }
 function selectLine(i) {
   hideSrcPopup();
