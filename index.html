@@ -389,7 +389,15 @@ async function openVideo(vodId) {
   showDetailLoading();
   const v = await loadDetail(vodId);
   if (!v) { toast('获取详情失败'); closeDetail(); return; }
-  S.vid = v; S.lines = parseLines(v); S.lineIdx = 0; S.epIdx = 0;
+  S.vid = v; S.lines = parseLines(v);
+  // Restore watch history
+  const hist = getWatchHistory(v.vod_id);
+  S.lineIdx = 0; S.epIdx = 0;
+  if (hist) {
+    const li = Math.min(hist.line, S.lines.length-1);
+    const ei = Math.min(hist.ep, (S.lines[li]?.episodes.length||1)-1);
+    S.lineIdx = li; S.epIdx = ei;
+  }
   renderDetail();
 }
 function showDetailLoading() {
@@ -401,6 +409,18 @@ function renderDetail() {
   let h = `<h2>${esc(v.vod_name||'详情')}</h2>
     <div class="d-meta">${[v.type_name,v.vod_remarks,v.vod_time].filter(Boolean).map(t=>`<span>${esc(t)}</span>`).join('')}</div>
     ${v.vod_content?`<div class="d-desc">${esc(v.vod_content.substring(0,400))}</div>`:''}`;
+  // Resume banner
+  const hist = getWatchHistory(v.vod_id);
+  if (hist) {
+    const lineName = S.lines[hist.line]?.name || '';
+    const epTitle = S.lines[hist.line]?.episodes[hist.ep]?.title || '';
+    const timeStr = fmtTime(hist.time);
+    h += `<div style="background:rgba(255,77,106,.1);border:1px solid var(--accent);border-radius:10px;padding:10px 14px;margin-bottom:14px;cursor:pointer;display:flex;align-items:center;gap:8px" onclick="playFromDetail(${hist.line},${hist.ep})">
+      <span style="font-size:18px">▶</span>
+      <div style="flex:1;min-width:0"><div style="font-size:13px;color:var(--text)">继续观看</div><div style="font-size:11px;color:var(--text2)">${esc(lineName)} · ${esc(epTitle)} · 上次看到 ${timeStr}</div></div>
+      <span style="color:var(--accent);font-size:12px">继续 ›</span>
+    </div>`;
+  }
   S.lines.forEach((l,li)=>{
     h += `<div class="d-line"><div class="d-lname">${esc(l.name)} <span class="cnt">${l.episodes.length}集</span></div><div class="d-eps">`;
     l.episodes.forEach((e,ei)=>{ h += `<span onclick="playFromDetail(${li},${ei})">${esc(e.title)}</span>`; });
@@ -429,6 +449,41 @@ function loadCurrentEpisode() {
   if (!e) return;
   document.getElementById('pSrc').textContent = l.name + ' · ' + e.title;
   loadUrl(e.url);
+}
+
+// ============================
+// Watch History
+// ============================
+function getWatchHistory(vodId) {
+  try {
+    const h = JSON.parse(localStorage.getItem('watch_history')||'{}');
+    return h[vodId] || null;
+  } catch { return null; }
+}
+function saveWatchProgress() {
+  const v = S.vid, el = S.videoEl;
+  if (!v || !el) return;
+  const t = el.currentTime, dur = el.duration;
+  if (!dur || isNaN(t) || t <= 0) return;
+  // Only save meaningful progress (past 5s and before last 10s)
+  if (t < 5 || dur - t < 10) return;
+  try {
+    const h = JSON.parse(localStorage.getItem('watch_history')||'{}');
+    h[v.vod_id] = {line:S.lineIdx, ep:S.epIdx, time:t, dur, name:v.vod_name, at:Date.now()};
+    localStorage.setItem('watch_history', JSON.stringify(h));
+  } catch {}
+}
+function clearWatchProgress(vodId) {
+  try {
+    const h = JSON.parse(localStorage.getItem('watch_history')||'{}');
+    delete h[vodId];
+    localStorage.setItem('watch_history', JSON.stringify(h));
+  } catch {}
+}
+function fmtTime(sec) {
+  sec = Math.floor(sec||0);
+  const m = Math.floor(sec/60), s = sec%60;
+  return m>0 ? `${m}分${s}秒` : `${s}秒`;
 }
 function toggleEpsPopup() {
   const l = S.lines[S.lineIdx];
@@ -493,22 +548,40 @@ function loadUrl(url) {
   video.style.cssText = 'width:100%;height:100%;object-fit:contain';
   video.setAttribute('playsinline','');
 
+  // Resume position
+  const hist = S.vid ? getWatchHistory(S.vid.vod_id) : null;
+  const resumeAt = (hist && hist.line===S.lineIdx && hist.ep===S.epIdx) ? hist.time : 0;
+
+  const onReady = () => {
+    load.style.display='none';
+    if (resumeAt > 0 && resumeAt < video.duration - 10) {
+      video.currentTime = resumeAt;
+      toast('已续播 '+fmtTime(resumeAt));
+    }
+    video.play().catch(()=>{});
+  };
+
+  // Auto-save every 5s
+  video.addEventListener('timeupdate', ()=>{
+    if (Math.floor(video.currentTime) % 5 === 0) saveWatchProgress();
+  });
+
   if (/\.m3u8/i.test(url)) {
     if (window.Hls?.isSupported()) {
       const h = new Hls({enableWorker:true,lowLatencyMode:false});
       h.loadSource(url); h.attachMedia(video);
-      h.on(Hls.Events.MANIFEST_PARSED,()=>{load.style.display='none';video.play().catch(()=>{});});
+      h.on(Hls.Events.MANIFEST_PARSED, onReady);
       h.on(Hls.Events.ERROR,(e,d)=>{if(d.fatal)load.innerHTML='<div style="color:var(--accent)">播放失败</div><div style="font-size:12px;margin-top:4px">试试点击"换源"或切换其他线路</div>';});
       S.hls = h;
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = url;
-      video.addEventListener('loadeddata',()=>load.style.display='none');
+      video.addEventListener('loadeddata', onReady);
     } else {
       load.innerHTML = '<div style="color:var(--accent)">浏览器不支持此格式</div>';
     }
   } else {
     video.src = url;
-    video.addEventListener('loadeddata',()=>load.style.display='none');
+    video.addEventListener('loadeddata', onReady);
     video.addEventListener('error',()=>load.innerHTML='<div style="color:var(--accent)">加载失败</div><div style="font-size:12px;margin-top:4px">试试点击"换源"</div>');
   }
   wrap.appendChild(video);
@@ -516,6 +589,8 @@ function loadUrl(url) {
 }
 function destroyPlayer() {
   if (S.hls) { S.hls.destroy(); S.hls=null; }
+  // Save progress before destroying
+  try { saveWatchProgress(); } catch {}
   if (S.videoEl) { S.videoEl.remove(); S.videoEl=null; }
 }
 
