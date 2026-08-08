@@ -23,8 +23,17 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .search-wrap{flex:1;position:relative;min-width:0}
 .search-wrap input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:22px;color:var(--text);padding:9px 40px 9px 16px;font-size:14px;outline:none;transition:border-color .2s}
 .search-wrap input:focus{border-color:var(--accent)}
-.search-wrap .clear-btn{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text2);font-size:18px;cursor:pointer;display:none;padding:4px}
+.search-wrap .clear-btn{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text2);font-size:18px;cursor:pointer;display:none;padding:4px;z-index:2}
 .search-wrap .clear-btn.visible{display:block}
+.search-history{position:absolute;top:100%;left:0;right:0;background:var(--bg2);border:1px solid var(--border);border-radius:12px;margin-top:6px;padding:4px 0;z-index:150;display:none;box-shadow:0 4px 16px rgba(0,0,0,.5)}
+.search-history.show{display:block}
+.search-history .sh-title{font-size:11px;color:var(--text2);padding:8px 14px 4px;display:flex;justify-content:space-between}
+.search-history .sh-title button{background:none;border:none;color:var(--accent);font-size:11px;cursor:pointer}
+.search-history .sh-item{display:flex;align-items:center;padding:10px 14px;cursor:pointer;font-size:13px;color:var(--text);transition:background .15s}
+.search-history .sh-item:hover{background:rgba(255,77,106,.1)}
+.search-history .sh-item .sh-text{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.search-history .sh-item .sh-del{width:28px;height:28px;display:flex;align-items:center;justify-content:center;color:var(--text2);border-radius:50%;font-size:14px;flex-shrink:0}
+.search-history .sh-item .sh-del:hover{background:rgba(255,255,255,.1)}
 
 /* ========== Source Tabs ========== */
 .src-bar{display:flex;gap:8px;padding:10px 16px;background:var(--bg);border-bottom:1px solid var(--border);overflow-x:auto;scrollbar-width:none}
@@ -150,8 +159,9 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 <header class="header">
   <span class="logo" onclick="goHome()" title="回到首页">影视</span>
   <div class="search-wrap">
-    <input type="text" id="searchInput" placeholder="搜影片…" autocomplete="off" oninput="onSearchInput()" onkeydown="if(event.key==='Enter')doSearch()">
+    <input type="text" id="searchInput" placeholder="搜影片…" autocomplete="off" oninput="onSearchInput()" onkeydown="if(event.key==='Enter')doSearch()" onfocus="showSearchHistory()">
     <button class="clear-btn" id="clearBtn" onclick="clearSearch()">✕</button>
+    <div class="search-history" id="searchHistory"></div>
   </div>
 </header>
 
@@ -439,7 +449,17 @@ function showPopup(title, items) {
   const popup = document.getElementById('srcPopup');
   const overlay = document.getElementById('srcOverlay');
   if (popup.classList.contains('show')) { hideSrcPopup(); return; }
-  popup.innerHTML = `<div class="sp-title">${title}</div>` + items.map(it=>`<div class="sp-item${it.active?' current':''}" onclick="(${it.action.toString()})()">${it.name}</div>`).join('');
+  popup.innerHTML = `<div class="sp-title">${title}</div>` + items.map((it,i)=>`<div class="sp-item${it.active?' current':''}" data-idx="${i}">${it.name}</div>`).join('');
+  popup._items = items;
+  popup.onclick = function(e) {
+    const el = e.target.closest('.sp-item');
+    if (!el) return;
+    const idx = parseInt(el.dataset.idx);
+    if (!isNaN(idx) && popup._items[idx]) {
+      hideSrcPopup();
+      popup._items[idx].action();
+    }
+  };
   popup.classList.add('show');
   overlay.classList.add('show');
 }
@@ -547,16 +567,58 @@ async function downloadOne(url, title) {
 function onSearchInput() {
   const q = document.getElementById('searchInput').value;
   document.getElementById('clearBtn').classList.toggle('visible', q.length>0);
+  if (q.length > 0) hideSearchHistory();
 }
 function clearSearch() {
   document.getElementById('searchInput').value = '';
   document.getElementById('clearBtn').classList.remove('visible');
+  hideSearchHistory();
   goHome();
-  document.getElementById('searchInput').focus();
+}
+function getSearchHistory() {
+  try { return JSON.parse(localStorage.getItem('search_history')||'[]'); } catch { return []; }
+}
+function saveSearchHistory(q) {
+  let h = getSearchHistory().filter(s=>s!==q);
+  h.unshift(q);
+  if (h.length > 20) h = h.slice(0,20);
+  localStorage.setItem('search_history', JSON.stringify(h));
+}
+function showSearchHistory() {
+  const h = getSearchHistory();
+  if (!h.length) return;
+  const el = document.getElementById('searchHistory');
+  el.innerHTML = `<div class="sh-title">搜索历史 <button onclick="clearSearchHistory()">清空</button></div>` +
+    h.map((s,i)=>`<div class="sh-item" onclick="searchFromHistory('${esc(s).replace(/'/g,"\\'")}')"><span class="sh-text">${esc(s)}</span><span class="sh-del" onclick="event.stopPropagation();delSearchHistory(${i})">✕</span></div>`).join('');
+  el.classList.add('show');
+  document.addEventListener('click', hideSearchHistoryOutside, {once:true});
+}
+function hideSearchHistory() {
+  document.getElementById('searchHistory').classList.remove('show');
+}
+function hideSearchHistoryOutside(e) {
+  if (!e.target.closest('.search-wrap')) hideSearchHistory();
+}
+function searchFromHistory(q) {
+  document.getElementById('searchInput').value = q;
+  hideSearchHistory();
+  doSearch();
+}
+function delSearchHistory(i) {
+  let h = getSearchHistory();
+  h.splice(i,1);
+  localStorage.setItem('search_history', JSON.stringify(h));
+  showSearchHistory();
+}
+function clearSearchHistory() {
+  localStorage.removeItem('search_history');
+  hideSearchHistory();
 }
 async function doSearch() {
   const q = document.getElementById('searchInput').value.trim();
   if (!q) { goHome(); return; }
+  saveSearchHistory(q);
+  hideSearchHistory();
   S.searchMode = true;
   showSkeleton();
   const d = await apiFetch(apiUrl({ac:'videolist',wd:q,pg:1,pagesize:20}));
@@ -574,6 +636,7 @@ function goHome() {
   closePlayer(); closeDetail();
   document.getElementById('searchInput').value = '';
   document.getElementById('clearBtn').classList.remove('visible');
+  hideSearchHistory();
   S.searchMode = false;
   if (S.catId < 0) { S.catId = 0; loadCategories(); }
   loadVideos(S.catId, 1);
