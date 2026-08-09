@@ -415,7 +415,7 @@ function renderDetail() {
     const lineName = S.lines[hist.line]?.name || '';
     const epTitle = S.lines[hist.line]?.episodes[hist.ep]?.title || '';
     const timeStr = fmtTime(hist.time);
-    h += `<div style="background:rgba(255,77,106,.1);border:1px solid var(--accent);border-radius:10px;padding:10px 14px;margin-bottom:14px;cursor:pointer;display:flex;align-items:center;gap:8px" onclick="playFromDetail(${hist.line},${hist.ep})">
+    h += `<div style="background:rgba(255,77,106,.1);border:1px solid var(--accent);border-radius:10px;padding:10px 14px;margin-bottom:14px;cursor:pointer;display:flex;align-items:center;gap:8px" onclick="playFromDetail(${hist.line},${hist.ep},${hist.time})">
       <span style="font-size:18px">▶</span>
       <div style="flex:1;min-width:0"><div style="font-size:13px;color:var(--text)">继续观看</div><div style="font-size:11px;color:var(--text2)">${esc(lineName)} · ${esc(epTitle)} · 上次看到 ${timeStr}</div></div>
       <span style="color:var(--accent);font-size:12px">继续 ›</span>
@@ -430,9 +430,10 @@ function renderDetail() {
   document.getElementById('detailSheet').innerHTML = h;
 }
 function closeDetail() { document.getElementById('detailOverlay').classList.remove('show'); }
-function playFromDetail(li, ei) {
+function playFromDetail(li, ei, resumeSec) {
   closeDetail();
   S.lineIdx = li; S.epIdx = ei;
+  S._resumeAt = resumeSec || 0;  // explicit resume time passed from banner
   showPlayer();
   loadCurrentEpisode();
 }
@@ -548,18 +549,13 @@ function loadUrl(url) {
   video.style.cssText = 'width:100%;height:100%;object-fit:contain';
   video.setAttribute('playsinline','');
 
-  // Resume position
-  const hist = S.vid ? getWatchHistory(S.vid.vod_id) : null;
-  const resumeAt = (hist && hist.line===S.lineIdx && hist.ep===S.epIdx) ? hist.time : 0;
-
-  const onReady = (isResumed) => {
-    load.style.display='none';
-    if (resumeAt > 0 && !isResumed) {
-      try { video.currentTime = resumeAt; } catch {}
-      toast('已续播 '+fmtTime(resumeAt));
-    }
-    video.play().catch(()=>{});
-  };
+  // Resume position: explicit from banner, else auto-detect from history
+  let resumeAt = S._resumeAt || 0;
+  if (!resumeAt && S.vid) {
+    const hist = getWatchHistory(S.vid.vod_id);
+    if (hist && hist.line===S.lineIdx && hist.ep===S.epIdx) resumeAt = hist.time;
+  }
+  S._resumeAt = 0;  // consume
 
   // Auto-save every 5s
   video.addEventListener('timeupdate', ()=>{
@@ -567,27 +563,52 @@ function loadUrl(url) {
     if (t > 0 && t % 5 === 0) saveWatchProgress();
   });
 
+  const seekToResume = () => {
+    if (resumeAt <= 0) return;
+    // Retry seek a few times after metadata is available
+    let attempts = 0;
+    const trySeek = () => {
+      attempts++;
+      try {
+        if (video.readyState >= 1 && !isNaN(video.duration) && isFinite(video.duration) && video.duration > resumeAt) {
+          video.currentTime = resumeAt;
+          if (Math.abs(video.currentTime - resumeAt) < 2 || video.currentTime > 1) {
+            toast('已续播 '+fmtTime(resumeAt));
+            return;
+          }
+        }
+      } catch(e) {}
+      if (attempts < 10) setTimeout(trySeek, 400);
+    };
+    setTimeout(trySeek, 300);
+  };
+
+  const doSeek = () => {
+    load.style.display='none';
+    seekToResume();
+    video.play().catch(()=>{});
+  };
+
   if (/\.m3u8/i.test(url)) {
     if (window.Hls?.isSupported()) {
-      // hls.js native startPosition — reliable seek for HLS streams
-      const h = new Hls({enableWorker:true,lowLatencyMode:false, startPosition: resumeAt > 0 ? resumeAt : -1});
+      const h = new Hls({enableWorker:true,lowLatencyMode:false});
       h.loadSource(url); h.attachMedia(video);
       h.on(Hls.Events.MANIFEST_PARSED, ()=>{
         load.style.display='none';
-        if (resumeAt > 0) toast('已续播 '+fmtTime(resumeAt));
+        seekToResume();
         video.play().catch(()=>{});
       });
       h.on(Hls.Events.ERROR,(e,d)=>{if(d.fatal)load.innerHTML='<div style="color:var(--accent)">播放失败</div><div style="font-size:12px;margin-top:4px">试试点击"换源"或切换其他线路</div>';});
       S.hls = h;
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = url;
-      video.addEventListener('loadeddata', ()=>onReady());
+      video.addEventListener('loadeddata', ()=>{doSeek(false);});
     } else {
       load.innerHTML = '<div style="color:var(--accent)">浏览器不支持此格式</div>';
     }
   } else {
     video.src = url;
-    video.addEventListener('loadeddata', ()=>onReady());
+    video.addEventListener('loadeddata', ()=>{doSeek(false);});
     video.addEventListener('error',()=>load.innerHTML='<div style="color:var(--accent)">加载失败</div><div style="font-size:12px;margin-top:4px">试试点击"换源"</div>');
   }
   wrap.appendChild(video);
