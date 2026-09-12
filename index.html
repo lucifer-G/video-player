@@ -234,6 +234,7 @@ const PROXIES = [
 const S = {
   srcIdx: 0,
   cats: [],
+  childMap: {},          // 父分类 id -> 子分类 id 数组（API 只能按子分类查，父分类靠这个合并）
   catId: 0,
   page: 1, totalPages: 1, totalVids: 0,
   vids: [],
@@ -241,6 +242,7 @@ const S = {
   lines: [], lineIdx: 0, epIdx: 0,
   hls: null, videoEl: null,
   searchMode: false,
+  parentMode: false, parentPage: 0, parentKids: [],
 };
 
 // ============================
@@ -339,17 +341,73 @@ function parseLinesComma(v) {
 // ============================
 async function loadCategories() {
   const d = await apiFetch(apiUrl({ac:'list',pg:1,pagesize:1}));
-  if (d) { S.cats = d.class||[]; renderCategoryBar(); }
+  if (d) {
+    S.cats = d.class||[];
+    S.childMap = {};
+    S.cats.forEach(c => {
+      if (c.type_pid) {
+        if (!S.childMap[c.type_pid]) S.childMap[c.type_pid] = [];
+        S.childMap[c.type_pid].push(c.type_id);
+      }
+    });
+    renderCategoryBar();
+  }
 }
 async function loadVideos(catId, page) {
   S.catId = catId; S.page = page; S.searchMode = false;
+  S.parentMode = false; S.parentPage = 0;
   showSkeleton();
+  // 父分类（「电影片」这类）走合并子分类的通道
+  if (S.childMap[catId] && S.childMap[catId].length) {
+    if (await loadParentCat(catId, page, false)) return;
+    showEmpty('加载失败','请检查网络后重试',true); return;
+  }
   const params = {ac:'videolist',pg:page,pagesize:20};
   if (catId > 0) params.t = catId;
   const d = await apiFetch(apiUrl(params));
   if (!d) { showEmpty('加载失败','请检查网络后重试',true); return; }
   S.vids = d.list||[]; S.totalVids = d.total||S.vids.length; S.totalPages = d.pagecount||Math.ceil(S.totalVids/20);
   renderVideos(); renderPager(); renderCategoryBar();
+}
+
+// 父分类：maccms 的 t 参数只按 type_id 精确匹配，父分类直接查只会返回 1 条
+// （实测传逗号列表也只认第一个 id）。所以并发拉取全部子分类的同一页，
+// 合并去重后按上映/更新时间倒序 —— 11 个子分类约 622 KB，是普通一页（413 KB）的 1.5 倍。
+async function loadParentCat(catId, page, append) {
+  const kids = S.childMap[catId] || [];
+  if (!kids.length) return false;
+  // 父分类自己也挂了片子（量子的「连续剧」直接查就有 20 条），所以父 id 也要并进来
+  const ids = [catId].concat(kids);
+  const rs = await Promise.all(ids.map(id =>
+    apiFetch(apiUrl({ac:'videolist',pg:page,pagesize:20,t:id}), 20000)));
+  if (rs.every(r => r == null)) return false;   // 全部失败，交给调用方出错误页
+  const seen = new Set(append ? S.vids.map(v => v.vod_id) : []);
+  const batch = [];
+  rs.forEach(r => (r?.list||[]).forEach(v => {
+    if (v.vod_id != null && !seen.has(v.vod_id)) { seen.add(v.vod_id); batch.push(v); }
+  }));
+  batch.sort((a,b) => String(b.vod_time||'').localeCompare(String(a.vod_time||'')));
+  S.parentMode = true; S.parentPage = page; S.parentKids = ids;
+  S.totalVids = rs.slice(1).reduce((s,r) => s + (r?.total||0), 0);  // 只统计子分类，避免重复计数
+  S.totalPages = 1;                             // 父分类用「加载更多」而非翻页
+  if (append) { S.vids = S.vids.concat(batch); appendVideos(batch); }
+  else { S.vids = batch; renderVideos(); }
+  renderMore(); renderCategoryBar();
+  return true;
+}
+async function loadMoreParent(btn) {
+  btn.disabled = true; btn.textContent = '加载中…';
+  if (!await loadParentCat(S.catId, S.parentPage + 1, true)) {
+    toast('加载失败，请重试');
+    renderMore();
+  }
+}
+function renderMore() {
+  document.getElementById('moreBtn')?.remove();
+  if (!S.parentMode) return;
+  const d = document.createElement('div'); d.className = 'pager'; d.id = 'moreBtn';
+  d.innerHTML = `<button onclick="loadMoreParent(this)">加载更多</button><span class="page-info">已加载 ${S.vids.length} / ${S.totalVids} 部</span>`;
+  document.getElementById('content').appendChild(d);
 }
 async function loadDetail(ids) {
   const d = await apiFetch(apiUrl({ac:'detail',ids}), 15000);
@@ -364,7 +422,7 @@ function renderSourceBar() {
 }
 function switchSource(i) {
   if (i===S.srcIdx) return;
-  S.srcIdx=i; S.cats=[]; S.catId=0;
+  S.srcIdx=i; S.cats=[]; S.childMap={}; S.catId=0; S.parentMode=false;
   renderSourceBar();
   loadCategories(); loadVideos(0,1);
 }
@@ -387,19 +445,26 @@ function showSkeleton() {
 function showEmpty(title, desc, retry) {
   document.getElementById('content').innerHTML = `<div class="empty"><div class="icon">📭</div><h3>${title}</h3><p>${desc}</p>${retry?'<button class="btn-primary" onclick="loadVideos(S.catId,S.page)">重试</button>':''}</div>`;
 }
+function cardHTML(v) {
+  const name = esc(v.vod_name||'?');
+  const pic = v.vod_pic||'';
+  const remark = esc(v.vod_remarks||'');
+  const type = esc(v.type_name||'');
+  return `<div class="card" onclick="openVideo(${v.vod_id})">
+    <div class="cover-wrap">${pic?`<img src="${pic}" loading="lazy" onerror="this.parentElement.innerHTML='<div class=cover-placeholder>🎬</div>'">`:'<div class="cover-placeholder">🎬</div>'}<span class="badge">${remark||type}</span></div>
+    <div class="info"><div class="title">${name}</div><div class="sub">${type?`<span class="type-tag">${type}</span>`:''}${remark?remark:''}</div></div>
+  </div>`;
+}
 function renderVideos() {
   const c = document.getElementById('content');
   if (!S.vids.length) { showEmpty('没有内容','试试切换数据源',false); return; }
-  c.innerHTML = `<div class="grid">${S.vids.map(v=>{
-    const name = esc(v.vod_name||'?');
-    const pic = v.vod_pic||'';
-    const remark = esc(v.vod_remarks||'');
-    const type = esc(v.type_name||'');
-    return `<div class="card" onclick="openVideo(${v.vod_id})">
-      <div class="cover-wrap">${pic?`<img src="${pic}" loading="lazy" onerror="this.parentElement.innerHTML='<div class=cover-placeholder>🎬</div>'">`:'<div class="cover-placeholder">🎬</div>'}<span class="badge">${remark||type}</span></div>
-      <div class="info"><div class="title">${name}</div><div class="sub">${type?`<span class="type-tag">${type}</span>`:''}${remark?remark:''}</div></div>
-    </div>`;
-  }).join('')}</div>`;
+  c.innerHTML = `<div class="grid" id="grid">${S.vids.map(cardHTML).join('')}</div>`;
+}
+// 「加载更多」只追加卡片，不重建整个网格（父分类可能累积到几百张卡）
+function appendVideos(list) {
+  const g = document.getElementById('grid');
+  if (!g) { renderVideos(); return; }
+  g.insertAdjacentHTML('beforeend', list.map(cardHTML).join(''));
 }
 function renderPager() {
   if (S.totalPages <= 1) return;
@@ -747,7 +812,7 @@ async function doSearch() {
   if (!q) { goHome(); return; }
   saveSearchHistory(q);
   hideSearchHistory();
-  S.searchMode = true;
+  S.searchMode = true; S.parentMode = false;
   showSkeleton();
   const d = await apiFetch(apiUrl({ac:'videolist',wd:q,pg:1,pagesize:20}));
   if (!d) { showEmpty('搜索失败','请重试',true); return; }
