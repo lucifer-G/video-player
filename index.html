@@ -215,9 +215,15 @@ const SOURCES = [
   {name:'非凡', api:'http://cj.ffzyapi.com/api.php/provide/vod/'},
 ];
 
+// race: 同一请求并发几路；tries: 该代理整体重试几次
+// 源站（maccms）不发 CORS 头且不支持 JSONP，浏览器必须经代理
 const PROXIES = [
-  {url:'https://proxy.cors.sh/', fmt:'path'},
-  {url:'https://corsproxy.io/?', fmt:'query'},
+  // 主通道：自建 Cloudflare Worker，实测 0.2~0.8s
+  {url:'https://video-cors-proxy-luciferg.cors-worker-luciferg2026.workers.dev/?url=', fmt:'query', race:1, tries:2},
+  // 以下公共代理均不稳定或已失效，仅作兜底
+  {url:'https://api.allorigins.win/raw?url=', fmt:'query', race:2, tries:1},
+  {url:'https://proxy.cors.sh/', fmt:'path', race:1, tries:1},
+  {url:'https://corsproxy.io/?', fmt:'query', race:1, tries:1},
 ];
 
 // ============================
@@ -251,25 +257,43 @@ function apiUrl(params={}) {
   return base + (base.includes('?')?'&':'?') + q;
 }
 
-async function apiFetch(url, timeout=20000) {
-  // proxy-first for reliability
-  for (const p of PROXIES) {
-    try {
-      const u = p.fmt==='query' ? p.url+encodeURIComponent(url) : p.url+url;
-      const r = await fetch(u, {signal:AbortSignal.timeout(timeout)});
-      if (r.ok) {
-        const t = await r.text();
-        if (t.startsWith('<?xml')||t.startsWith('<')) return parseXml(t);
-        return JSON.parse(t);
-      }
-    } catch {}
-  }
-  // direct fallback
+// 单次请求：成功返回解析后的数据，失败返回 null
+async function fetchOnce(target, timeout) {
   try {
-    const r = await fetch(url, {signal:AbortSignal.timeout(timeout)});
-    if (r.ok) { const t = await r.text(); return t.startsWith('<') ? parseXml(t) : JSON.parse(t); }
-  } catch {}
-  return null;
+    const r = await fetch(target, {signal:AbortSignal.timeout(timeout)});
+    if (!r.ok) return null;
+    const t = await r.text();
+    if (t.startsWith('<?xml')||t.startsWith('<')) return parseXml(t);
+    return JSON.parse(t);
+  } catch { return null; }
+}
+
+// 并发竞速：同时发多个请求，取第一个成功的（比串行重试更快也更稳）
+function raceFetch(targets, timeout) {
+  return new Promise(resolve => {
+    let pending = targets.length, settled = false;
+    const finish = v => { if (!settled) { settled = true; resolve(v); } };
+    if (!pending) return finish(null);
+    for (const t of targets) {
+      fetchOnce(t, timeout).then(res => {
+        if (res != null) finish(res);
+        else if (--pending === 0) finish(null);
+      });
+    }
+  });
+}
+
+async function apiFetch(url, timeout=15000) {
+  // 代理优先：源站不发 CORS 头，浏览器里直连必被拦
+  for (const p of PROXIES) {
+    const build = () => p.fmt==='query' ? p.url+encodeURIComponent(url) : p.url+url;
+    for (let t = 0; t < (p.tries||1); t++) {
+      const d = await raceFetch(Array.from({length: p.race||1}, build), timeout);
+      if (d != null) return d;
+    }
+  }
+  // 直连兜底（源站目前无 CORS 头，仅作源站未来开放的保险）
+  return fetchOnce(url, timeout);
 }
 
 function parseXml(xml) {
