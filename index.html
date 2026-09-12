@@ -218,8 +218,10 @@ const SOURCES = [
 // race: 同一请求并发几路；tries: 该代理整体重试几次
 // 源站（maccms）不发 CORS 头且不支持 JSONP，浏览器必须经代理
 const PROXIES = [
-  // 主通道：自建 Cloudflare Worker，实测 0.2~0.8s
-  {url:'https://video-cors-proxy-luciferg.cors-worker-luciferg2026.workers.dev/?url=', fmt:'query', race:1, tries:2},
+  // 主通道：Cloudflare Pages Function —— *.pages.dev 未被 GFW 污染，无需挂代理即可访问
+  {url:'https://video-cors-proxy-luciferg.pages.dev/api?url=', fmt:'query', race:1, tries:2},
+  // 备用通道：Cloudflare Worker（*.workers.dev 已被 GFW 污染，仅在挂了代理时可用）
+  {url:'https://video-cors-proxy-luciferg.cors-worker-luciferg2026.workers.dev/?url=', fmt:'query', race:1, tries:1},
   // 以下公共代理均不稳定或已失效，仅作兜底
   {url:'https://api.allorigins.win/raw?url=', fmt:'query', race:2, tries:1},
   {url:'https://proxy.cors.sh/', fmt:'path', race:1, tries:1},
